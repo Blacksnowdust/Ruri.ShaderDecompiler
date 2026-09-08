@@ -45,7 +45,7 @@ public static class ShaderLabWriter
         ArgumentNullException.ThrowIfNull(metadata);
 
         var writer = new IndentedWriter();
-        writer.Line($"Shader \"{metadata.Name}\" {{");
+        writer.Line($"Shader \"{metadata.ParsedForm.Name}\" {{");
         writer.Indent();
 
         WriteProperties(writer, metadata.ParsedForm.PropInfo);
