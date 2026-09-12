@@ -86,6 +86,7 @@ internal sealed class DecompilePipeline
             result.SourceCode = source.Text;
             result.SourceLanguage = source.Language;
             result.SourceFileExtension = source.FileExtension;
+            result.Stage = source.Stage;
             result.FinalSpirv = injected;
             result.StructuringLog = _structurer.LastRewriteSummary;
             return result;

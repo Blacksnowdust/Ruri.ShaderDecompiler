@@ -3,10 +3,10 @@ using Ruri.ShaderTools.Pipeline.Native;
 namespace Ruri.ShaderTools.Pipeline.Backend;
 
 /// <summary>Emitted high-level source plus the language it came out as.</summary>
-internal readonly record struct EmittedSource(string Text, string Language, string FileExtension)
+internal readonly record struct EmittedSource(string Text, string Language, string FileExtension, PipelineStage Stage)
 {
-    public static EmittedSource Hlsl(string text) => new(text, "hlsl", ".hlsl");
-    public static EmittedSource Glsl(string text) => new(text, "glsl", ".glsl");
+    public static EmittedSource Hlsl(string text, PipelineStage stage) => new(text, "hlsl", ".hlsl", stage);
+    public static EmittedSource Glsl(string text, PipelineStage stage) => new(text, "glsl", ".glsl", stage);
 }
 
 /// <summary>
@@ -61,7 +61,7 @@ internal sealed class SourceEmitter
         {
             if (TryEmitHlsl(spirv, entry, shaderModel, out string? hlsl))
             {
-                return EmittedSource.Hlsl(hlsl!);
+                return EmittedSource.Hlsl(hlsl!, entry.Stage);
             }
 
             // The attempt above was silent so a successful fallback stays quiet in
@@ -76,7 +76,7 @@ internal sealed class SourceEmitter
 
         if (TryEmitGlsl(spirv, entry, out string? glsl))
         {
-            return EmittedSource.Glsl(glsl!);
+            return EmittedSource.Glsl(glsl!, entry.Stage);
         }
 
         throw new InvalidOperationException("Failed to decompile patched SPIR-V.");

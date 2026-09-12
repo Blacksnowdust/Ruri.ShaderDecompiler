@@ -100,6 +100,34 @@ public sealed class DecompileOptions
 }
 
 /// <summary>
+/// The pipeline stage a shader binary runs at, as the binary itself declares it.
+///
+/// Read from the module's own entry point rather than from whatever table shipped
+/// alongside it: a container's stage numbering is the ENGINE BUILD's, and a fork that
+/// inserts one frequency shifts every later one, which mislabels the source silently --
+/// a pixel shader written out as a compute shader reads as "this map has no pixel
+/// shader" and nothing ever says otherwise.
+/// </summary>
+public enum PipelineStage
+{
+    Unknown = 0,
+    Vertex,
+    TessControl,
+    TessEvaluation,
+    Geometry,
+    Fragment,
+    Compute,
+    RayGeneration,
+    Intersection,
+    AnyHit,
+    ClosestHit,
+    Miss,
+    Callable,
+    Task,
+    Mesh,
+}
+
+/// <summary>
 /// Outcome of one decompile, including — on failure — every intermediate needed
 /// to diagnose it offline.
 ///
@@ -119,6 +147,9 @@ public sealed class DecompileResult
 
     /// <summary>How far the pipeline got.</summary>
     public DecompileStage FailedStage { get; set; } = DecompileStage.NotStarted;
+
+    /// <summary>What stage the binary declared itself to run at; Unknown when it never got that far.</summary>
+    public PipelineStage Stage { get; set; } = PipelineStage.Unknown;
 
     // --- per-stage SPIR-V ---------------------------------------------------
 

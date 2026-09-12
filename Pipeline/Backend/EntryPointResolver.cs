@@ -3,7 +3,7 @@ using Ruri.ShaderTools.Spirv;
 namespace Ruri.ShaderTools.Pipeline.Backend;
 
 /// <summary>Which entry point to emit, and what it is.</summary>
-internal readonly record struct EntryPointSelection(ShaderStage Stage, string? Name, uint ExecutionModel);
+internal readonly record struct EntryPointSelection(PipelineStage Stage, string? Name, uint ExecutionModel);
 
 /// <summary>
 /// Picks the entry point to hand the source backend.
@@ -40,6 +40,6 @@ internal static class EntryPointResolver
             }
         }
 
-        return first ?? new EntryPointSelection(ShaderStage.Unknown, preferredName, 0u);
+        return first ?? new EntryPointSelection(PipelineStage.Unknown, preferredName, 0u);
     }
 }
