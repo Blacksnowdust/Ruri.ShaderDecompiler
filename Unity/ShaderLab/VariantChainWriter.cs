@@ -53,10 +53,15 @@ internal static class VariantChainWriter
             }
         }
 
+        // ONE table for this pass, resolved before anything is written with it. What a pragma
+        // declares and what a condition tests have to be the same symbol: resolving them
+        // separately declared `KEYWORD_28` and then tested `_MRT`, so no branch of the chain
+        // could ever be taken and every variant fell through to the catch-all.
+        List<string> names = EffectiveKeywordNames(keywordNames, pass);
+
         // One multi_compile_local per keyword, deliberately NOT bundled. Bundling
         // makes a set mutually exclusive, which is wrong for independent toggles.
-        List<string> passKeywords = KeywordSymbols.ForPass(keywordNames, pass);
-        foreach (string keyword in passKeywords)
+        foreach (string keyword in KeywordSymbols.ForPass(names, pass))
         {
             writer.Line($"#pragma multi_compile_local _ {keyword}");
         }
@@ -65,10 +70,38 @@ internal static class VariantChainWriter
 
         foreach ((string stage, UnitySerializedProgram program) in pass.EnumerateProgramSlots())
         {
-            WriteStage(writer, keywordNames, stage, program.SubPrograms, subShaderIndex, passIndex, variants);
+            WriteStage(writer, names, stage, program.SubPrograms, subShaderIndex, passIndex, variants);
         }
 
         writer.Line("ENDHLSL");
+    }
+
+    /// <summary>
+    /// The table a keyword INDEX is a name in.
+    ///
+    /// A build states the names once for the whole shader; a build from before that states them
+    /// per PASS, as the pass's own name-index map, and leaves the shader-level list empty.
+    /// Reading only the shader-level one left every keyword of such a build unnamed, so its
+    /// conditions read <c>KEYWORD_7</c> where the shader said <c>_NORMALMAP</c> -- and a variant
+    /// whose only identity is a keyword it cannot name is a variant nobody can tell apart.
+    /// </summary>
+    private static List<string> EffectiveKeywordNames(List<string> shaderNames, UnitySerializedPass pass)
+    {
+        if (shaderNames.Count > 0)
+        {
+            return shaderNames;
+        }
+
+        List<string> names = [];
+        foreach (UnitySerializedNameIndex entry in pass.NameIndices)
+        {
+            while (names.Count <= entry.Second)
+            {
+                names.Add(string.Empty);
+            }
+            names[entry.Second] = entry.First;
+        }
+        return names;
     }
 
     private static void WriteStage(
@@ -87,6 +120,12 @@ internal static class VariantChainWriter
 
         writer.Line($"// Stage: {stage}");
 
+        // One body is one body: it reads better where it stands than behind an #include into a
+        // folder holding a single file. More than one and they all become files -- what tells
+        // them apart is a keyword condition where there is one and the file name where there is
+        // not, but every one of them is written either way.
+        bool split = variants.IsSplitting && subPrograms.Count > 1;
+
         string? stageMacro = GetStageMacro(stage);
         if (stageMacro is not null)
         {
@@ -97,21 +136,24 @@ internal static class VariantChainWriter
         // keyword the stage is indifferent to.
         List<ushort> stageKeywords = KeywordSymbols.DistinctIndices(subPrograms);
 
-        // Variants with identical keyword sets are platform variants of one
-        // logical compile; keep the first.
+        // Grouped by keyword set because that is what the #if chain branches on -- NOT to
+        // pick one of each. Every subprogram in a group is its own compile with its own
+        // bytecode blob and its own decompiled body, and all of them are emitted: a pass with
+        // sixteen programs writes sixteen. Keeping the first of each group threw fourteen of
+        // those sixteen away and reported "done (16/16 passes)" while doing it.
         var groups = subPrograms
             .GroupBy(subProgram => string.Join(",", subProgram.KeywordIndices.OrderBy(static index => index)))
             .ToList();
 
         if (groups.Count <= 1)
         {
-            // A single variant needs no #if chain around it; whether its body is a
-            // file of its own is the document's answer, the same as every other.
-            UnitySerializedSubProgram only = groups[0].First();
-            bool onlySplit = WillSplit(variants);
-
-            WriteVariantHeader(writer, stage, only, collapsed: 0, isCatchAll: false, split: onlySplit);
-            WriteBody(writer, stage, only, keywordNames, subShaderIndex, passIndex, variants, onlySplit);
+            // One keyword set needs no #if chain around it -- but it can still hold many
+            // compiles, and every one of them is written.
+            foreach (UnitySerializedSubProgram only in groups[0])
+            {
+                WriteVariantHeader(writer, stage, only, isCatchAll: false, split: split);
+                WriteBody(writer, stage, only, keywordNames, subShaderIndex, passIndex, variants, split);
+            }
             writer.Blank();
 
             if (stageMacro is not null)
@@ -146,20 +188,26 @@ internal static class VariantChainWriter
         for (int position = 0; position < emitOrder.Count; position++)
         {
             IGrouping<string, UnitySerializedSubProgram> group = groups[emitOrder[position]];
-            UnitySerializedSubProgram primary = group.First();
             bool isLast = position == emitOrder.Count - 1;
 
+            // The condition is the GROUP's -- every compile in it was built for the same
+            // keyword set, which is exactly why they share a branch.
+            List<ushort> condition = group.First().KeywordIndices.ToList();
             string directive = position switch
             {
-                0 => "#if " + (KeywordSymbols.BuildCondition(keywordNames, stageKeywords, primary.KeywordIndices.ToList()) ?? "1"),
+                0 => "#if " + (KeywordSymbols.BuildCondition(keywordNames, stageKeywords, condition) ?? "1"),
                 _ when isLast => "#else",
-                _ => "#elif " + (KeywordSymbols.BuildCondition(keywordNames, stageKeywords, primary.KeywordIndices.ToList()) ?? "1"),
+                _ => "#elif " + (KeywordSymbols.BuildCondition(keywordNames, stageKeywords, condition) ?? "1"),
             };
             writer.Line(directive);
 
-            bool bodySplit = WillSplit(variants);
-            WriteVariantHeader(writer, stage, primary, group.Count() - 1, isLast, bodySplit);
-            WriteBody(writer, stage, primary, keywordNames, subShaderIndex, passIndex, variants, bodySplit);
+            bool firstOfBranch = true;
+            foreach (UnitySerializedSubProgram compile in group)
+            {
+                WriteVariantHeader(writer, stage, compile, isLast && firstOfBranch, split);
+                WriteBody(writer, stage, compile, keywordNames, subShaderIndex, passIndex, variants, split);
+                firstOfBranch = false;
+            }
         }
 
         writer.Line("#endif");
@@ -182,7 +230,7 @@ internal static class VariantChainWriter
     /// facts that have no other home are written: that several platform variants
     /// collapsed onto this one, and that this is the chain's catch-all.
     /// </summary>
-    private static void WriteVariantHeader(IndentedWriter writer, string stage, UnitySerializedSubProgram subProgram, int collapsed, bool isCatchAll, bool split)
+    private static void WriteVariantHeader(IndentedWriter writer, string stage, UnitySerializedSubProgram subProgram, bool isCatchAll, bool split)
     {
         if (!split)
         {
@@ -191,11 +239,6 @@ internal static class VariantChainWriter
                 : "<none>";
 
             writer.Line($"// Stage: {stage}, Blob: {subProgram.BlobIndex}, ParamBlob: {parameterBlob}, Language: {subProgram.SourceLanguage}");
-        }
-
-        if (collapsed > 0)
-        {
-            writer.Line($"// {collapsed} platform variant(s) collapsed here.");
         }
 
         if (isCatchAll)
@@ -255,20 +298,6 @@ internal static class VariantChainWriter
     private static bool IsHlsl(UnitySerializedSubProgram subProgram)
         => string.Equals(subProgram.SourceLanguage, "hlsl", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// Will this variant's body become an <c>#include</c> rather than sit inline?
-    ///
-    /// Splitting is asked of the DOCUMENT, so the answer is the document's: every
-    /// body becomes a file, or none does.
-    ///
-    /// It used to be asked per keyword CHAIN, and a chain of one stayed inline.
-    /// That measures the wrong thing. A shader with no multi_compile at all still
-    /// has thousands of passes — one real one reached 13,824 programs, every single
-    /// one its own chain of one — so the rule inlined all of them and wrote not one
-    /// file, for exactly the shader that needed them. "How many keyword
-    /// combinations share this stage" was never "how big is this shader".
-    /// </summary>
-    private static bool WillSplit(VariantFileSet variants) => variants.IsSplitting;
 
     /// <summary>
     /// Every stage keeps the entry name <c>main</c>. The stage guards make only
