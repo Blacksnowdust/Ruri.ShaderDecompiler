@@ -105,10 +105,10 @@ internal static class VariantChainWriter
 
         if (groups.Count <= 1)
         {
-            // A single variant needs no chain, so its body is inlined — unless it
-            // is one of the bodies that must be split whatever the chain looks like.
+            // A single variant needs no #if chain around it; whether its body is a
+            // file of its own is the document's answer, the same as every other.
             UnitySerializedSubProgram only = groups[0].First();
-            bool onlySplit = WillSplit(only, variants, chainSplit: false);
+            bool onlySplit = WillSplit(variants);
 
             WriteVariantHeader(writer, stage, only, collapsed: 0, isCatchAll: false, split: onlySplit);
             WriteBody(writer, stage, only, keywordNames, subShaderIndex, passIndex, variants, onlySplit);
@@ -157,7 +157,7 @@ internal static class VariantChainWriter
             };
             writer.Line(directive);
 
-            bool bodySplit = WillSplit(primary, variants, chainSplit: variants.IsSplitting);
+            bool bodySplit = WillSplit(variants);
             WriteVariantHeader(writer, stage, primary, group.Count() - 1, isLast, bodySplit);
             WriteBody(writer, stage, primary, keywordNames, subShaderIndex, passIndex, variants, bodySplit);
         }
@@ -258,16 +258,17 @@ internal static class VariantChainWriter
     /// <summary>
     /// Will this variant's body become an <c>#include</c> rather than sit inline?
     ///
-    /// Normally that is the chain's decision — a lone variant is cheaper left in
-    /// place. A FOREIGN body overrides it, because "is the chain long enough to be
-    /// worth splitting" is the wrong question for one: these are the largest
-    /// bodies in the archive, and a single shader inlining 468 of them reached
-    /// 75 MB across a million lines. One shared answer, because the emitted header
-    /// and the emitted body have to agree about it — a header describing a body
-    /// that then arrives as an include is the same fact stated twice.
+    /// Splitting is asked of the DOCUMENT, so the answer is the document's: every
+    /// body becomes a file, or none does.
+    ///
+    /// It used to be asked per keyword CHAIN, and a chain of one stayed inline.
+    /// That measures the wrong thing. A shader with no multi_compile at all still
+    /// has thousands of passes — one real one reached 13,824 programs, every single
+    /// one its own chain of one — so the rule inlined all of them and wrote not one
+    /// file, for exactly the shader that needed them. "How many keyword
+    /// combinations share this stage" was never "how big is this shader".
     /// </summary>
-    private static bool WillSplit(UnitySerializedSubProgram subProgram, VariantFileSet variants, bool chainSplit)
-        => chainSplit || (!IsHlsl(subProgram) && variants.IsSplitting);
+    private static bool WillSplit(VariantFileSet variants) => variants.IsSplitting;
 
     /// <summary>
     /// Every stage keeps the entry name <c>main</c>. The stage guards make only

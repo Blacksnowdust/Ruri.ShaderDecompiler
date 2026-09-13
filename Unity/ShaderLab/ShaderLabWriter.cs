@@ -37,7 +37,30 @@ public static class ShaderLabWriter
     public static ShaderLabDocument WriteSplit(UnityShaderMetadata metadata, string variantFolderName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(variantFolderName);
-        return Render(metadata, new VariantFileSet(variantFolderName));
+        // Splitting is the DOCUMENT's decision, taken once here and then true of every body in
+        // it. A shader that compiled to one program is one file and reads better as one; a
+        // shader that compiled to thousands is why splitting exists. Asking it per keyword
+        // CHAIN instead answered "no chain to slim down" for each of those thousands
+        // separately and wrote no files at all for exactly the shaders that needed them.
+        return Render(metadata, new VariantFileSet(BodyCount(metadata) > 1 ? variantFolderName : null));
+    }
+
+    /// <summary>How many program bodies this shader compiled to, across every subshader, pass and stage.</summary>
+    private static int BodyCount(UnityShaderMetadata metadata)
+    {
+        ArgumentNullException.ThrowIfNull(metadata);
+        int bodies = 0;
+        foreach (UnitySerializedSubShader subShader in metadata.ParsedForm.SubShaders)
+        {
+            foreach (UnitySerializedPass pass in subShader.Passes)
+            {
+                foreach ((_, UnitySerializedProgram program) in pass.EnumerateProgramSlots())
+                {
+                    bodies += program.SubPrograms.Count;
+                }
+            }
+        }
+        return bodies;
     }
 
     private static ShaderLabDocument Render(UnityShaderMetadata metadata, VariantFileSet variants)

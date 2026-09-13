@@ -16,13 +16,17 @@ public sealed class ShaderDecompilerSettings
     public const string ModuleKey = "ShaderDecompiler";
 
     /// <summary>
-    /// When true (default), multi-variant stages emit per-variant
-    /// `<stem>/<variantKey>.hlsl` files and the .shader file uses
-    /// `#include` distributors per `#if defined(KEYWORD)` branch.
-    /// When false, every variant body stays inline inside the .shader
-    /// file under its `#if defined` block. Single-variant stages always
-    /// inline regardless — distribution is only useful when there's
-    /// actually a chain to slim down.
+    /// When true (default), every program body is emitted as its own
+    /// `<stem>/<variantKey>.hlsl` file and the .shader file `#include`s
+    /// them, one per `#if defined(KEYWORD)` branch where there is a chain.
+    /// When false, every body stays inline inside the .shader file.
+    ///
+    /// Every body of a shader that compiled to more than one, not just the
+    /// ones sharing a stage with others: a shader with no multi_compile at
+    /// all still has thousands of passes, and asking "is there a chain to
+    /// slim down" answered no for all of them and wrote no files at all for
+    /// exactly the shaders that needed them. A shader that compiled to a
+    /// single body stays one file.
     ///
     /// Default is true: multi-variant URP/HDRP shaders (30+ × 30+
     /// variants per pass) produce a .shader so large that Unity's
