@@ -155,6 +155,8 @@ internal static class ScalarBlockVectorizer
         // rather than inserted mid-iteration.
         var pending = new Dictionary<SpirvInstruction, (SpirvInstruction Shift, SpirvInstruction Mask)>();
 
+        Span<uint> rewritten = stackalloc uint[7];
+
         foreach (IndexSplit split in splits)
         {
             uint registerId;
@@ -184,7 +186,6 @@ internal static class ScalarBlockVectorizer
             }
 
             SpirvInstruction chain = split.Instruction;
-            Span<uint> rewritten = stackalloc uint[7];
             rewritten[0] = SpvOpCode.MakeInstructionWord(chain.OpCode, 7);
             rewritten[1] = chain[1];
             rewritten[2] = chain[2];
