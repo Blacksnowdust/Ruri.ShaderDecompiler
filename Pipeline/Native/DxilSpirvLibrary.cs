@@ -89,8 +89,19 @@ internal static unsafe class DxilSpirvLibrary
 
             // --ssbo-uav --ssbo-srv: route structured/raw SRV & UAV buffers through SSBO storage
             // (fixes "raw 64-bit load-store must be SSBO/UBO/BDA"). Textures keep IDENTITY.
+            //
+            // All FOUR resource kinds are remapped, not just the two that carry buffers. A shader
+            // model 6.6 shader reaches a resource through the descriptor heap rather than a
+            // register, and the converter asks the remapper of that resource's KIND whether the
+            // binding it produced is a heap binding -- a constant buffer or a sampler taken from
+            // the heap asks the cbv and sampler remappers. With those two left at their defaults
+            // the answer was always "not a heap binding", and dxil-spirv refused every such
+            // shader with "SM 6.6 bindless references must be bindless": on one shipped title
+            // that was every ray tracing shader in the install, twelve thousand of them.
             dxil_spv_converter_set_srv_remapper(converter, &RemapSrv, null);
             dxil_spv_converter_set_uav_remapper(converter, &RemapUav, null);
+            dxil_spv_converter_set_cbv_remapper(converter, &RemapCbv, null);
+            dxil_spv_converter_set_sampler_remapper(converter, &RemapSampler, null);
 
             if (dxil_spv_converter_run(converter) != 0)
             { error = $"dxil_spv_converter_run failed.{Detail()}"; return null; }
@@ -177,6 +188,47 @@ internal static unsafe class DxilSpirvLibrary
         return 1; // DXIL_SPV_TRUE
     }
 
+    /// <summary>
+    /// A constant buffer, bound where it is declared or taken from the descriptor heap. Never a
+    /// push constant: that is a statement about a pipeline layout this pipeline does not build.
+    /// </summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int RemapCbv(void* userdata, D3DBinding* binding, CbvVulkanBinding* vk)
+    {
+        *vk = default;
+        if (IsGlobalHeap(binding))
+        {
+            vk->Uniform.UseHeap = 1;
+            vk->Uniform.Set = 0;
+            vk->Uniform.Binding = 0;
+        }
+        else
+        {
+            vk->Uniform.Set = binding->RegisterSpace;
+            vk->Uniform.Binding = binding->RegisterIndex;
+        }
+        return 1; // DXIL_SPV_TRUE
+    }
+
+    /// <summary>A sampler, bound where it is declared or taken from the descriptor heap.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int RemapSampler(void* userdata, D3DBinding* binding, VulkanBinding* vk)
+    {
+        *vk = default;
+        if (IsGlobalHeap(binding))
+        {
+            vk->UseHeap = 1;
+            vk->Set = 0;
+            vk->Binding = 0;
+        }
+        else
+        {
+            vk->Set = binding->RegisterSpace;
+            vk->Binding = binding->RegisterIndex;
+        }
+        return 1; // DXIL_SPV_TRUE
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool IsGlobalHeap(D3DBinding* b)
         => b->RegisterIndex == uint.MaxValue && b->RegisterSpace == uint.MaxValue && b->RangeSize == uint.MaxValue;
@@ -213,6 +265,13 @@ internal static unsafe class DxilSpirvLibrary
     {
         public VulkanBinding Buffer;
         public VulkanBinding Offset;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CbvVulkanBinding   // dxil_spv_cbv_vulkan_binding (28 bytes)
+    {
+        public VulkanBinding Uniform;   // union { uniform_binding; push_constant; }
+        public int PushConstant;        // dxil_spv_bool
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -279,6 +338,12 @@ internal static unsafe class DxilSpirvLibrary
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     private static extern void dxil_spv_converter_set_uav_remapper(
         IntPtr converter, delegate* unmanaged[Cdecl]<void*, UavD3DBinding*, UavVulkanBinding*, int> remapper, void* userdata);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void dxil_spv_converter_set_cbv_remapper(
+        IntPtr converter, delegate* unmanaged[Cdecl]<void*, D3DBinding*, CbvVulkanBinding*, int> remapper, void* userdata);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void dxil_spv_converter_set_sampler_remapper(
+        IntPtr converter, delegate* unmanaged[Cdecl]<void*, D3DBinding*, VulkanBinding*, int> remapper, void* userdata);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     private static extern int dxil_spv_converter_run(IntPtr converter);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
