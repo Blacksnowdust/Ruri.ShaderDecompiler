@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using Ruri.ShaderTools.Pipeline.Naming;
 using Silk.NET.SPIRV;
 using Silk.NET.SPIRV.Cross;
 using CrossBackend = Silk.NET.SPIRV.Cross.Backend;
@@ -88,12 +89,12 @@ internal sealed unsafe class SpirvCrossDriver
                 return Fail(context);
             }
 
-            string text = StripBlockMemberPrefixes(Marshal.PtrToStringUTF8((IntPtr)source) ?? string.Empty, plan.BlockMemberPrefixes);
+            string text = Marshal.PtrToStringUTF8((IntPtr)source) ?? string.Empty;
 
-            string? unlanded = FindUnlandedMember(text, plan.BlockMemberPrefixes);
+            string? unlanded = RestoreAuthoredMembers(compiler, ref text, plan.FlattenedBlocks);
             if (unlanded is not null)
             {
-                LastFailure = $"Planned constant-buffer member did not land in the emitted HLSL: {unlanded}. The backend spelled it differently from the name that was injected.";
+                LastFailure = unlanded;
                 return null;
             }
 
@@ -132,68 +133,59 @@ internal sealed unsafe class SpirvCrossDriver
     }
 
     /// <summary>
-    /// spirv-cross spells every flattened block member <c>&lt;Variable&gt;_&lt;Member&gt;</c>
-    /// and offers no option to stop. The variable name is the one this pipeline
-    /// injected, so each member is located as an exact token and the variable
-    /// half removed, leaving the leading underscore that the sanitiser trimmed
-    /// off the author's name. Generated placeholders keep the prefix: they are
-    /// unique only within their block, and HLSL gives all block members one
-    /// global namespace.
+    /// The backend flattens every constant buffer into
+    /// <c>&lt;variable&gt;_&lt;member&gt;</c> identifiers and offers no option to
+    /// stop. Its spelling of both halves is read back from it after compilation —
+    /// that is the spelling it uniquified and wrote, including any respelling of
+    /// a name it would not accept — and joined the way it joins them: one
+    /// underscore, runs collapsed. Each joined identifier is then replaced, as a
+    /// whole token, by the member's own name.
+    ///
+    /// A planned member whose joined identifier is not in the text is a member
+    /// Unity will never bind. Refusing here turns a renders-wrong shader into a
+    /// failure that names the exact member and the spelling that was looked for,
+    /// so the naming path that lost it can be found instead of guessed at.
     /// </summary>
-    private static string StripBlockMemberPrefixes(string text, IReadOnlyList<BlockMemberPrefix> prefixes)
+    private static string? RestoreAuthoredMembers(Compiler* compiler, ref string text, IReadOnlyList<FlattenedBlock> blocks)
     {
-        if (prefixes.Count == 0)
+        if (blocks.Count == 0)
         {
-            return text;
+            return null;
         }
 
         StringBuilder builder = new(text.Length);
-        string current = text;
 
-        foreach (BlockMemberPrefix block in prefixes)
+        foreach (FlattenedBlock block in blocks)
         {
-            foreach (string member in block.MemberNames)
+            string variable = ReadName(Api.CompilerGetName(compiler, block.VariableId));
+            if (variable.Length == 0)
             {
-                if (IsGeneratedName(member))
-                {
-                    continue;
-                }
-
-                string emitted = block.VariableName + "_" + member;
-                string desired = "_" + member;
-                current = ReplaceWholeToken(current, emitted, desired, builder);
+                return $"Planned constant-buffer variable {block.VariableId} lost its name in the backend.";
             }
-        }
 
-        return current;
-    }
-
-    private static bool IsGeneratedName(string member)
-        => member.StartsWith(GeneratedNames.StrippedSymbol, StringComparison.Ordinal)
-        || member.StartsWith(GeneratedNames.UnmappedRegion, StringComparison.Ordinal)
-        || member.StartsWith(GeneratedNames.UnstructuredBlock, StringComparison.Ordinal);
-
-    /// <summary>
-    /// A member the plan named but the text does not contain as a bare token is
-    /// a member Unity will never bind. Refusing here turns a renders-wrong
-    /// shader into a failure that names the exact member, so the naming path
-    /// that mis-spelled it can be found instead of guessed at.
-    /// </summary>
-    private static string? FindUnlandedMember(string text, IReadOnlyList<BlockMemberPrefix> prefixes)
-    {
-        foreach (BlockMemberPrefix block in prefixes)
-        {
-            foreach (string member in block.MemberNames)
+            foreach (uint member in block.AuthoredMembers)
             {
-                if (!IsGeneratedName(member) && !ContainsWholeToken(text, "_" + member))
+                string name = ReadName(Api.CompilerGetMemberName(compiler, block.StructTypeId, member));
+                if (name.Length == 0)
                 {
-                    return $"{block.VariableName}.{member}";
+                    return $"Planned member {member} of constant buffer '{variable}' lost its name in the backend.";
                 }
+
+                string flattened = HlslIdentifier.CollapseUnderscores(variable + "_" + name);
+                if (!ContainsWholeToken(text, flattened))
+                {
+                    return $"Planned constant-buffer member did not land in the emitted HLSL: {variable}.{name} (looked for '{flattened}').";
+                }
+
+                text = ReplaceWholeToken(text, flattened, name, builder);
             }
         }
 
         return null;
     }
+
+    private static string ReadName(byte* utf8)
+        => utf8 == null ? string.Empty : Marshal.PtrToStringUTF8((IntPtr)utf8) ?? string.Empty;
 
     private static bool ContainsWholeToken(string text, string token)
     {

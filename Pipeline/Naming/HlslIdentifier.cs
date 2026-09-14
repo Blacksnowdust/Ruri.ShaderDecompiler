@@ -3,16 +3,17 @@ using System.Text;
 namespace Ruri.ShaderTools.Pipeline.Naming;
 
 /// <summary>
-/// Turns an author-supplied symbol name into an HLSL identifier, MATCHING what
-/// the source emitter will do to it.
+/// Turns an author-supplied symbol name into the identifier the source backend
+/// emits for it UNCHANGED — the fixed point of its sanitiser — so the name
+/// injected into the module is the name that comes back out.
 ///
-/// The matching part is the whole point. The emitter replaces non-alphanumeric
-/// characters with underscores AND collapses runs of them. Sanitising here
-/// without collapsing means the collision check runs on strings the emitter will
-/// then fuse together: a CJK parameter name yielding <c>AO_________</c> and
-/// another yielding <c>AO__</c> look distinct at dedup time, both come out of the
-/// emitter as <c>AO_</c>, and the generated source has two identically named
-/// members — a hard compile error in the artifact the user actually opens.
+/// The backend replaces every character outside <c>[A-Za-z0-9_]</c> with an
+/// underscore, collapses runs of underscores, and will not accept a leading
+/// digit; a name already in that form passes through it untouched. Nothing else
+/// is normalised. In particular an author's leading underscore is part of the
+/// name: Unity binds <c>_Color</c> and <c>unity_OrthoParams</c> by exactly that
+/// spelling, and trimming it would manufacture a property nothing on the CPU
+/// side ever sets.
 ///
 /// Encoding-agnostic by construction: CJK, Arabic, emoji, punctuation and
 /// whitespace all take the same replace-then-collapse path. No character lists.
@@ -20,9 +21,9 @@ namespace Ruri.ShaderTools.Pipeline.Naming;
 internal static class HlslIdentifier
 {
     /// <summary>
-    /// Sanitise, collapse underscore runs, trim both ends, and guard a leading
-    /// digit. Returns empty when nothing survives — the caller substitutes an
-    /// offset-based placeholder rather than emitting a nameless member.
+    /// Sanitise, collapse underscore runs, and guard a leading digit. Returns
+    /// empty when no alphanumeric character survives — the caller substitutes an
+    /// offset-based placeholder rather than emitting a member named <c>_</c>.
     /// </summary>
     public static string Sanitize(string? raw)
     {
@@ -31,51 +32,74 @@ internal static class HlslIdentifier
             return string.Empty;
         }
 
-        var builder = new StringBuilder(raw.Length);
-        bool lastWasUnderscore = false;
+        var builder = new StringBuilder(raw.Length + 1);
+        bool anyAlphanumeric = false;
 
         foreach (char c in raw)
         {
             bool isAlphanumeric = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
-            if (isAlphanumeric)
-            {
-                builder.Append(c);
-                lastWasUnderscore = false;
-            }
-            else if (!lastWasUnderscore)
-            {
-                builder.Append('_');
-                lastWasUnderscore = true;
-            }
-            // else: part of a run — collapsed.
+            anyAlphanumeric |= isAlphanumeric;
+            builder.Append(isAlphanumeric || c == '_' ? c : '_');
         }
 
-        // Trim BOTH ends. The emitter also collapses underscores across the
-        // variable-prefix boundary, so a member named "_AO" comes out as
-        // `<Block>_AO` with the leading underscore fused into the separator.
-        // Trimming here makes dedup see what will actually be produced.
-        int start = 0;
-        while (start < builder.Length && builder[start] == '_')
-        {
-            start++;
-        }
-
-        int end = builder.Length;
-        while (end > start && builder[end - 1] == '_')
-        {
-            end--;
-        }
-
-        if (end == start)
+        if (!anyAlphanumeric)
         {
             return string.Empty;
         }
 
-        string body = builder.ToString(start, end - start);
+        if (builder[0] >= '0' && builder[0] <= '9')
+        {
+            builder.Insert(0, '_');
+        }
 
-        // Leading-digit guard. Applied uniformly, so dedup still sees the same
-        // collision shape it would have without it.
-        return body[0] >= '0' && body[0] <= '9' ? "_" + body : body;
+        return CollapseUnderscores(builder.ToString());
+    }
+
+    /// <summary>
+    /// Runs of underscores collapsed to one: the backend's own rule, applied both
+    /// to every identifier it sanitises and to the <c>variable_member</c>
+    /// identifiers it builds when it flattens a block.
+    /// </summary>
+    public static string CollapseUnderscores(string value)
+    {
+        if (!HasUnderscoreRun(value))
+        {
+            return value;
+        }
+
+        var builder = new StringBuilder(value.Length);
+        bool lastWasUnderscore = false;
+
+        foreach (char c in value)
+        {
+            bool isUnderscore = c == '_';
+            if (isUnderscore && lastWasUnderscore)
+            {
+                continue;
+            }
+
+            builder.Append(c);
+            lastWasUnderscore = isUnderscore;
+        }
+
+        return builder.ToString();
+    }
+
+    private static bool HasUnderscoreRun(string value)
+    {
+        bool lastWasUnderscore = false;
+        foreach (char c in value)
+        {
+            bool isUnderscore = c == '_';
+            if (isUnderscore && lastWasUnderscore)
+            {
+                return true;
+            }
+
+            lastWasUnderscore = isUnderscore;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -104,6 +128,6 @@ internal static class HlslIdentifier
 
     private const string StrippedSymbolMarker = GeneratedNames.StrippedSymbol;
 
-    /// <summary>Disambiguator appended when two members sanitise to one identifier.</summary>
+    /// <summary>Disambiguator appended when two members would become one identifier.</summary>
     public static string DisambiguateAt(string sanitized, int byteOffset) => $"{sanitized}_at_{byteOffset}";
 }

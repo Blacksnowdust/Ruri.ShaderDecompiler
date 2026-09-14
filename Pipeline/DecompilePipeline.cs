@@ -71,12 +71,12 @@ internal sealed class DecompilePipeline
             Enrich(options, structured, symbols);
 
             stage = DecompileStage.SymbolInjection;
-            (byte[] injected, List<BlockMemberPrefix> prefixes) = Inject(structured, symbols);
+            (byte[] injected, List<FlattenedBlock> flattened) = Inject(structured, symbols);
             result.SpirvAfterSymbolInjection = injected;
 
             stage = DecompileStage.SourceEmission;
             EntryPointSelection entry = EntryPointResolver.Resolve(injected, symbols.EntryPoint);
-            EmissionPlan plan = BuildPlan(entry, shaderModel, format, frontend.InputSignature, prefixes);
+            EmissionPlan plan = BuildPlan(entry, shaderModel, format, frontend.InputSignature, flattened);
             string source = Emit(injected, symbols, plan);
 
             result.Success = true;
@@ -131,7 +131,7 @@ internal sealed class DecompilePipeline
         }
     }
 
-    private (byte[] Spirv, List<BlockMemberPrefix> Prefixes) Inject(byte[] spirv, SerializedProgramData symbols)
+    private (byte[] Spirv, List<FlattenedBlock> Flattened) Inject(byte[] spirv, SerializedProgramData symbols)
     {
         try
         {
@@ -140,18 +140,18 @@ internal sealed class DecompilePipeline
             // overwrite whichever of them turn out to be recoverable.
             spirv = AnonymousMemberNamer.Apply(spirv);
 
-            var prefixes = new List<BlockMemberPrefix>();
+            var flattened = new List<FlattenedBlock>();
             if (symbols.GetResourceBindingCount() == 0)
             {
-                return (spirv, prefixes);
+                return (spirv, flattened);
             }
 
             List<DescriptorBindingInfo> bindings = BindingScanner.Scan(spirv);
             List<NamePatch> names = new ResourceNamePlanner(_structurer.GetResolvedBlockName).Plan(bindings, symbols);
             List<MemberNamePatch> members = new BlockMemberNamePlanner(_structurer.GetResolvedBlockName).Plan(bindings, symbols);
 
-            CollectBlockMemberPrefixes(bindings, names, members, prefixes);
-            return (DebugNameInjector.Inject(spirv, names, members), prefixes);
+            CollectFlattenedBlocks(bindings, names, members, flattened);
+            return (DebugNameInjector.Inject(spirv, names, members), flattened);
         }
         catch (Exception exception)
         {
@@ -164,53 +164,53 @@ internal sealed class DecompilePipeline
     }
 
     /// <summary>
-    /// Pair every constant-buffer variable's injected name with the member names
-    /// injected into its struct. The backend will spell each member as
-    /// <c>&lt;variable&gt;_&lt;member&gt;</c>; recording the pair here is what lets
-    /// the driver undo that as an exact token rather than a search.
+    /// For every constant buffer whose variable this pass named, the member
+    /// indices that received a recovered symbol rather than a generated marker.
+    /// The backend will flatten each block to <c>&lt;variable&gt;_&lt;member&gt;</c>
+    /// identifiers; the plan records which of those the driver restores to the
+    /// bare symbol, by id, so the spelling is read back from the backend rather
+    /// than predicted.
     /// </summary>
-    private static void CollectBlockMemberPrefixes(
+    private static void CollectFlattenedBlocks(
         List<DescriptorBindingInfo> bindings,
         List<NamePatch> names,
         List<MemberNamePatch> members,
-        List<BlockMemberPrefix> prefixes)
+        List<FlattenedBlock> flattened)
     {
         foreach (DescriptorBindingInfo binding in bindings)
         {
-            if (binding.Kind != DescriptorKind.UniformBuffer || binding.StructTypeId is not uint structTypeId)
+            if (binding.Kind != DescriptorKind.UniformBuffer || binding.StructTypeId is not uint structTypeId || !IsNamed(names, binding.Id))
             {
                 continue;
             }
 
-            string? variableName = null;
-            foreach (NamePatch patch in names)
-            {
-                if (patch.Id == binding.Id)
-                {
-                    variableName = patch.Name;
-                    break;
-                }
-            }
-
-            if (variableName is null)
-            {
-                continue;
-            }
-
-            var memberNames = new List<string>();
+            var authored = new List<uint>();
             foreach (MemberNamePatch patch in members)
             {
-                if (patch.StructTypeId == structTypeId)
+                if (patch.StructTypeId == structTypeId && !GeneratedNames.IsGenerated(patch.Name))
                 {
-                    memberNames.Add(patch.Name);
+                    authored.Add(patch.MemberIndex);
                 }
             }
 
-            if (memberNames.Count > 0)
+            if (authored.Count > 0)
             {
-                prefixes.Add(new BlockMemberPrefix(variableName, memberNames));
+                flattened.Add(new FlattenedBlock(binding.Id, structTypeId, authored));
             }
         }
+    }
+
+    private static bool IsNamed(List<NamePatch> names, uint id)
+    {
+        foreach (NamePatch patch in names)
+        {
+            if (patch.Id == id)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -225,10 +225,10 @@ internal sealed class DecompilePipeline
         uint shaderModel,
         ShaderBinaryFormat format,
         IReadOnlyList<InputSignatureElement> signature,
-        List<BlockMemberPrefix> prefixes)
+        List<FlattenedBlock> flattened)
     {
         var plan = new EmissionPlan { EntryPoint = entry, ShaderModel = shaderModel };
-        plan.BlockMemberPrefixes.AddRange(prefixes);
+        plan.FlattenedBlocks.AddRange(flattened);
 
         if (entry.Stage != PipelineStage.Vertex)
         {

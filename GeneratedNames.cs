@@ -40,4 +40,18 @@ internal static class GeneratedNames
     /// when a block contains several.
     /// </summary>
     public const string UnmappedRegion = "Unmapped";
+
+    /// <summary>
+    /// Whether a member name is one of these markers rather than a recovered
+    /// symbol. Every marker is the bare word or the word followed by an
+    /// underscore and its qualifier, so an authored name that merely begins with
+    /// the same letters is not mistaken for one.
+    /// </summary>
+    public static bool IsGenerated(string name)
+        => Matches(name, StrippedSymbol) || Matches(name, UnstructuredBlock) || Matches(name, UnmappedRegion);
+
+    private static bool Matches(string name, string marker)
+        => name.Length == marker.Length
+            ? string.Equals(name, marker, StringComparison.Ordinal)
+            : name.Length > marker.Length && name[marker.Length] == '_' && name.StartsWith(marker, StringComparison.Ordinal);
 }

@@ -4,24 +4,30 @@ namespace Ruri.ShaderTools.Pipeline.Backend;
 internal readonly record struct VertexAttributeSemantic(uint Location, string Semantic);
 
 /// <summary>
-/// A constant buffer whose members the backend will spell as
-/// <c>&lt;VariableName&gt;_&lt;MemberName&gt;</c>. The prefix is ours — it is the
-/// variable name we injected — so undoing it afterwards is an exact-token
-/// operation on a known key, not a search.
+/// A constant buffer the backend will flatten, spelling every member
+/// <c>&lt;variable&gt;_&lt;member&gt;</c>. <see cref="AuthoredMembers"/> lists the
+/// member indices whose names are recovered symbols; those are restored to the
+/// bare symbol in the emitted text. Members left out keep the prefix: their
+/// names are generated placeholders, unique only within their block, and HLSL
+/// gives every block member one global namespace.
+///
+/// Ids rather than strings, because the backend respells names it will not
+/// accept. The spelling it actually wrote is read back from it by id after
+/// compilation instead of being predicted.
 /// </summary>
-internal sealed record BlockMemberPrefix(string VariableName, IReadOnlyList<string> MemberNames);
+internal sealed record FlattenedBlock(uint VariableId, uint StructTypeId, IReadOnlyList<uint> AuthoredMembers);
 
 /// <summary>
 /// Every decision the source backend needs that the SPIR-V module itself cannot
 /// carry. Names live in the module as <c>OpName</c>; this holds the rest:
-/// which semantic each vertex input declares, and which block-member prefixes
-/// to strip back off the emitted text.
+/// which semantic each vertex input declares, and which flattened blocks get
+/// their members restored to bare symbols.
 /// </summary>
 internal sealed class EmissionPlan
 {
     public List<VertexAttributeSemantic> VertexAttributes { get; } = new();
 
-    public List<BlockMemberPrefix> BlockMemberPrefixes { get; } = new();
+    public List<FlattenedBlock> FlattenedBlocks { get; } = new();
 
     public EntryPointSelection EntryPoint { get; init; }
 

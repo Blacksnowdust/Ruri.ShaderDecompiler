@@ -121,15 +121,23 @@ internal sealed class BlockMemberNamePlanner
             }
 
             string final = sanitized;
-            if (!claimed.Add(sanitized))
+            if (!claimed.Add(FlattenedIdentity(sanitized)))
             {
                 final = HlslIdentifier.DisambiguateAt(sanitized, byteOffset);
-                claimed.Add(final);
+                claimed.Add(FlattenedIdentity(final));
             }
 
             patches.Add(new MemberNamePatch(structTypeId, (uint)memberIndex, final));
         }
     }
+
+    /// <summary>
+    /// What two member names must differ in to stay two identifiers once the
+    /// backend flattens the block. It joins the block name to each member with
+    /// an underscore and collapses the run, so a member's leading underscores are
+    /// not part of its identity there: <c>_Foo</c> and <c>Foo</c> are one name.
+    /// </summary>
+    private static string FlattenedIdentity(string member) => HlslIdentifier.CollapseUnderscores("_" + member);
 
     // Byte offset → author name. Struct fields first so a struct's own name wins
     // its offset over a numeric member that happens to share it; first entry per
