@@ -25,7 +25,9 @@ internal static class ShaderDecompileBatch
         int cpuUsageCapPercent,
         CancellationToken cancellationToken)
     {
-        int workerCount = maxConcurrency > 0 ? maxConcurrency : Math.Max(1, Environment.ProcessorCount * 2);
+        // Decompiling is compute from end to end; a worker per core is the whole machine, and two
+        // per core only made them take turns.
+        int workerCount = maxConcurrency > 0 ? maxConcurrency : Math.Max(1, Environment.ProcessorCount);
 
         var queue = new BlockingCollection<int>(boundedCapacity: requests.Count);
         for (int i = 0; i < requests.Count; i++)

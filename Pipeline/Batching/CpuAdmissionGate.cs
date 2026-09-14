@@ -36,7 +36,12 @@ internal sealed class CpuAdmissionGate : IDisposable
     {
         _ceiling = Math.Max(1, ceiling);
         _cpuCapPercent = Math.Clamp(cpuCapPercent, 1, 100);
-        _allowed = Math.Min(1, _ceiling);
+        // The cap is a share of the machine, so that share is what runs from the first job on.
+        // Starting from one job and granting another per sample left a batch of three hundred
+        // shaders effectively serial for most of its life: the ramp restarted with every batch
+        // and reached the cores only after seconds. The monitor still grants beyond the share
+        // while the machine sits idle, and never takes a running job back.
+        _allowed = Math.Clamp(_ceiling * _cpuCapPercent / 100, 1, _ceiling);
 
         _monitorCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _monitor = Task.Run(() => MonitorLoop(_monitorCts.Token));
