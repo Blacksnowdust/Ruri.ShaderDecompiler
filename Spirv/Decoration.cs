@@ -29,6 +29,10 @@ public static class Decoration
     public const uint MatrixStride = 7;
     public const uint BuiltIn = 11;
     public const uint Location = 30;
+
+    /// <summary>First scalar slot a variable occupies within its location, when several share one.</summary>
+    public const uint Component = 31;
+
     public const uint Binding = 33;
     public const uint DescriptorSet = 34;
 

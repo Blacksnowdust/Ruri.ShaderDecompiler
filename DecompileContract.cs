@@ -38,6 +38,9 @@ public enum DecompileStage
     /// <summary>Scalar constant-buffer layout normalised to <c>float4</c>.</summary>
     ScalarLayoutNormalization,
 
+    /// <summary>Component-packed interstage variables given one location each.</summary>
+    InterstageSlotAssignment,
+
     /// <summary>Flat constant buffers rewritten into named block members.</summary>
     ConstantBufferStructuring,
 

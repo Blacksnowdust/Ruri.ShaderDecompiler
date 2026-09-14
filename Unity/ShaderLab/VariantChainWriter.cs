@@ -271,13 +271,8 @@ internal static class VariantChainWriter
             return;
         }
 
-        string source = TextLines.TrimTrailingWhitespace(subProgram.SourceCode!);
-        bool hlsl = IsHlsl(subProgram);
-
-        // The Unity adaptations are HLSL rewrites; a foreign body passes through
-        // untouched. Everything after this point treats the two alike.
-        string body = hlsl ? UnityHlslAdapter.Adapt(source, stage) : source;
-        string? legend = hlsl ? UnityHlslAdapter.RecoveryLegend(body) : null;
+        string body = TextLines.TrimTrailingWhitespace(subProgram.SourceCode!);
+        string? legend = GeneratedNameLegend.For(body);
 
         if (split)
         {
@@ -294,10 +289,6 @@ internal static class VariantChainWriter
 
         writer.Raw(body);
     }
-
-    private static bool IsHlsl(UnitySerializedSubProgram subProgram)
-        => string.Equals(subProgram.SourceLanguage, "hlsl", StringComparison.OrdinalIgnoreCase);
-
 
     /// <summary>
     /// Every stage keeps the entry name <c>main</c>. The stage guards make only

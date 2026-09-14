@@ -4,21 +4,20 @@ using System.Runtime.InteropServices;
 namespace Ruri.ShaderTools.Pipeline.Native;
 
 /// <summary>
-/// Resolves the in-process native libraries the decompiler P/Invokes into. There are no child
-/// processes, no disk round-trips, and no loose binaries any more — both natives come from NuGet:
-/// <list type="bullet">
-///   <item><c>spirv-cross.dll</c> — <c>Silk.NET.SPIRV.Cross.Native</c> (SPIR-V → HLSL/GLSL).</item>
-///   <item><c>dxil-spirv-c-shared.dll</c> — <c>AssetRipper.Bindings.DxilSpirV</c> (legacy DXBC and
-///   DXIL → SPIR-V; its bundled dxbc-spirv handles SM5 DXBC directly, so no Microsoft dxilconv).</item>
-/// </list>
-/// Both are restored under <c>runtimes/&lt;rid&gt;/native</c> beside whichever assembly the
+/// Resolves the one native library this assembly P/Invokes into directly:
+/// <c>dxil-spirv-c-shared.dll</c> from <c>AssetRipper.Bindings.DxilSpirV</c> (legacy DXBC and
+/// DXIL → SPIR-V; its bundled dxbc-spirv handles SM5 DXBC directly, so no Microsoft dxilconv).
+/// spirv-cross is reached through the Silk.NET managed binding, whose own loader locates its
+/// native library — this resolver is registered for this assembly alone and never sees it.
+///
+/// The library is restored under <c>runtimes/&lt;rid&gt;/native</c> beside whichever assembly the
 /// restore was for. This assembly's own folder is probed first: a host that loads the decompiler
-/// as a module from a folder other than its own base directory has the natives beside the
+/// as a module from a folder other than its own base directory has the native beside the
 /// module, not beside the host. The app base directory follows, then any extra directory a host
-/// names. A single <see cref="NativeLibrary.SetDllImportResolver"/> hook loads each library by
+/// names. A single <see cref="NativeLibrary.SetDllImportResolver"/> hook loads the library by
 /// full path; on Windows a rooted-path load uses <c>LOAD_WITH_ALTERED_SEARCH_PATH</c> so any
-/// transitive dependency resolves from the same dir. The bindings register the hook themselves
-/// before their first call, so no caller has to remember to.
+/// transitive dependency resolves from the same dir. The binding registers the hook itself
+/// before its first call, so no caller has to remember to.
 /// </summary>
 internal static class NativeLibraryResolver
 {

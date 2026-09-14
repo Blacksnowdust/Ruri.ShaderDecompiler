@@ -2,38 +2,28 @@ using Ruri.ShaderTools.Pipeline.Native;
 
 namespace Ruri.ShaderTools.Pipeline.Frontend;
 
+/// <summary>What the front end recovered: the module, and the container's own input signature when it had one.</summary>
+internal readonly record struct FrontendOutput(byte[] Spirv, IReadOnlyList<InputSignatureElement> InputSignature);
+
 /// <summary>
 /// Compiled shader binary → SPIR-V, the pipeline's single intermediate form.
 ///
-/// Everything downstream — layout structuring, symbol injection, source emission
-/// — speaks only SPIR-V. This is the one place that knows any other format
-/// exists, which is why adding a new input container means adding a case here and
-/// nothing else.
+/// Everything downstream speaks only SPIR-V. This is the one place that knows
+/// any other format exists, which is why adding a new input container means
+/// adding a case here and nothing else.
 ///
-/// Legacy DXBC needs no separate conversion step: the translator detects the
-/// container and routes it through its own bundled legacy path.
+/// A DXBC container's input signature is read alongside the conversion because
+/// translation keeps only a numeric location per input; the signature is the
+/// only surviving record of which semantic each location was.
 /// </summary>
 public sealed class SpirvFrontend
 {
     /// <summary>
-    /// Convert a shader binary to pipeline-normalised SPIR-V, detecting its
-    /// container format.
-    ///
-    /// The public entry point for hosts that need SPIR-V for their OWN analysis
-    /// rather than a full decompile — recovering register assignments from a
-    /// reflection-stripped blob, say. Returns null instead of throwing, because a
-    /// host doing bulk analysis wants to skip a bad blob, not unwind.
-    ///
-    /// NORMALISATION IS INCLUDED, and that is the point of this method existing.
-    /// The legacy DXBC front end lowers a constant buffer to a SCALAR float array:
-    /// what looks like a register read is really <c>scalarIndex &gt;&gt; 2</c> with
-    /// <c>scalarIndex &amp; 3</c> selecting the component. A caller that converts
-    /// and then reads indices as if they were already vec4 registers is off by a
-    /// factor of four — while declared byte sizes, which do not depend on the
-    /// indexing scheme, still look plausible. Requiring every caller to remember a
-    /// second step invites exactly that bug, so the step is not optional here.
-    ///
-    /// Thread-safe and context-per-call: safe to run across a parallel loop.
+    /// Convert to pipeline-normalised SPIR-V for a host's own analysis. Returns
+    /// null instead of throwing so bulk scans skip a bad blob rather than unwind.
+    /// Layout normalisation is included: the legacy front end lowers a constant
+    /// buffer to a scalar array, and a caller reading indices as vec4 registers
+    /// without this step is silently off by four.
     /// </summary>
     public static byte[]? TryConvert(byte[] binary, out string? error)
     {
@@ -47,8 +37,8 @@ public sealed class SpirvFrontend
         try
         {
             var frontend = new SpirvFrontend();
-            byte[] spirv = frontend.Convert(ShaderBinaryFormatDetector.Detect(ShaderBinaryFormat.Unknown, binary), binary);
-            return Spirv.ScalarLayout.ScalarBlockVectorizer.Vectorize(spirv);
+            FrontendOutput output = frontend.Convert(ShaderBinaryFormatDetector.Detect(ShaderBinaryFormat.Unknown, binary), binary);
+            return Spirv.ScalarLayout.ScalarBlockVectorizer.Vectorize(output.Spirv);
         }
         catch (Exception exception)
         {
@@ -57,53 +47,30 @@ public sealed class SpirvFrontend
         }
     }
 
-    /// <summary>Upstream message from the most recent failed conversion.</summary>
     public string? LastFailure { get; private set; }
 
-    public byte[] Convert(ShaderBinaryFormat format, byte[] binary) => format switch
+    internal FrontendOutput Convert(ShaderBinaryFormat format, byte[] binary) => format switch
     {
-        ShaderBinaryFormat.Dxbc => ConvertDxbc(binary),
-        ShaderBinaryFormat.Dxil => RecoverInputSemantics(ConvertDxil(binary, ShaderBinaryFormatDetector.IsRawLlvmBitcode(binary)), binary),
-        ShaderBinaryFormat.SpirV => binary,
+        ShaderBinaryFormat.Dxbc => ConvertContainer(binary, rawLlvm: false),
+        ShaderBinaryFormat.Dxil => ConvertContainer(binary, ShaderBinaryFormatDetector.IsRawLlvmBitcode(binary)),
+        ShaderBinaryFormat.SpirV => new FrontendOutput(binary, Array.Empty<InputSignatureElement>()),
         _ => throw new InvalidOperationException($"Unsupported shader format: {format}"),
     };
 
-    private byte[] ConvertDxbc(byte[] dxbc)
+    private FrontendOutput ConvertContainer(byte[] container, bool rawLlvm)
     {
-        if (!ShaderBinaryFormatDetector.IsDxbc(dxbc))
+        if (!rawLlvm && !ShaderBinaryFormatDetector.IsDxbc(container))
         {
             throw new InvalidOperationException("Input does not contain a valid DXBC payload.");
         }
 
-        return RecoverInputSemantics(ConvertDxil(dxbc, rawLlvm: false), dxbc);
-    }
-
-    /// <summary>
-    /// Put the vertex attribute semantics back, from the container's own input
-    /// signature.
-    ///
-    /// Translation keeps only a numeric location for each input, so without this
-    /// every attribute emits as <c>TEXCOORD&lt;location&gt;</c> — and an engine
-    /// that binds vertex buffers by semantic name then feeds the first UV stream
-    /// into the position slot. The shader compiles and renders garbage, which is
-    /// far harder to notice than a failure.
-    ///
-    /// The signature is authoritative data that survives every strip a shipping
-    /// build applies; it was simply being discarded. No-op for a non-DXBC
-    /// container or a shader with no signature chunk.
-    /// </summary>
-    private static byte[] RecoverInputSemantics(byte[] spirv, ReadOnlySpan<byte> container)
-        => InputSemanticNamer.Apply(spirv, DxbcInputSignature.Read(container));
-
-    private byte[] ConvertDxil(byte[] dxil, bool rawLlvm)
-    {
-        byte[]? spirv = DxilSpirvLibrary.Convert(dxil, rawLlvm, out string? error);
+        byte[]? spirv = DxilSpirvLibrary.Convert(container, rawLlvm, out string? error);
         if (spirv is null)
         {
             LastFailure = error;
             throw new InvalidOperationException($"dxil-spirv did not produce a SPIR-V module. {error}");
         }
 
-        return spirv;
+        return new FrontendOutput(spirv, DxbcInputSignature.Read(container));
     }
 }

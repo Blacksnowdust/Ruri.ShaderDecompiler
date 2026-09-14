@@ -32,18 +32,4 @@ internal static class ShaderStageClassifier
         5365 => PipelineStage.Mesh,
         _ => PipelineStage.Unknown,
     };
-
-    /// <summary>
-    /// Stages whose built-ins an HLSL backend cannot represent at all, so the
-    /// HLSL attempt is skipped rather than made and discarded.
-    /// </summary>
-    public static bool RequiresGlsl(PipelineStage stage) => stage is
-        PipelineStage.RayGeneration
-        or PipelineStage.Intersection
-        or PipelineStage.AnyHit
-        or PipelineStage.ClosestHit
-        or PipelineStage.Miss
-        or PipelineStage.Callable
-        or PipelineStage.Task
-        or PipelineStage.Mesh;
 }

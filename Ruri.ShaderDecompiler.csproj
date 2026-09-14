@@ -13,9 +13,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- SPIR-V → HLSL/GLSL. Ships the native library under runtimes/<rid>/native;
-         the backend P/Invokes the stable spvc_* C ABI directly. -->
-    <PackageReference Include="Silk.NET.SPIRV.Cross.Native" Version="2.23.0" />
+    <!-- SPIR-V → HLSL. The managed binding exposes the full spvc_* C ABI —
+         reflection and the HLSL remapping calls that let emission be configured
+         rather than text-patched — and pulls the native library in itself. -->
+    <PackageReference Include="Silk.NET.SPIRV.Cross" Version="2.23.0" />
 
     <!-- DXBC/DXIL → SPIR-V. Bundles dxil-spirv-c-shared cross-platform, whose own
          legacy translator handles shader-model-5 DXBC directly, so no separate

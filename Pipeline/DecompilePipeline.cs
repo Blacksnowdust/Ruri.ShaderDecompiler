@@ -3,8 +3,10 @@ using Ruri.ShaderTools.Pipeline.Diagnostics;
 using Ruri.ShaderTools.Pipeline.Frontend;
 using Ruri.ShaderTools.Pipeline.Naming;
 using Ruri.ShaderTools.Spirv.ConstantBuffers;
+using Ruri.ShaderTools.Spirv.Interstage;
 using Ruri.ShaderTools.Spirv.ScalarLayout;
 using Ruri.ShaderTools.Spirv.SymbolInjection;
+using Ruri.ShaderTools.Unity;
 
 namespace Ruri.ShaderTools.Pipeline;
 
@@ -13,7 +15,7 @@ namespace Ruri.ShaderTools.Pipeline;
 ///
 /// <code>
 ///   binary → SPIR-V → scalar-layout normalise → structure constant buffers
-///          → [host symbol enrichment] → inject symbols → emit source
+///          → [host symbol enrichment] → inject symbols → plan emission → emit HLSL
 /// </code>
 ///
 /// Every step is engine-agnostic. Engine knowledge enters only through the
@@ -21,33 +23,24 @@ namespace Ruri.ShaderTools.Pipeline;
 /// unrelated engines without a branch anywhere in it.
 ///
 /// NOT thread-safe: it holds per-call state (the structurer's resolved names and
-/// log, the emitter's last failure). Each worker owns its own instance — which is
+/// log, the driver's last failure). Each worker owns its own instance — which is
 /// cheap, since construction resolves no resources.
 /// </summary>
 internal sealed class DecompilePipeline
 {
     /// <summary>
-    /// Shader model forced on the source backend.
+    /// Shader model floor for the source backend.
     ///
     /// The backend uses this value to gate WHICH INTRINSICS IT IS WILLING TO
-    /// EMIT — never to validate input. Every gate is of the form "emitting X
-    /// requires SM ≥ N"; there is no gate that requires SM ≤ N. So raising it can
-    /// only unlock, never lose:
-    ///
-    ///   * "Wave ops requires SM 6.0 or higher" — fires on SM5 inputs too,
-    ///     because translation can produce subgroup ops regardless of source model
-    ///   * "Sampling non-float textures is not supported in HLSL SM &lt; 6.7" —
-    ///     fires on classic SM5 shaders sampling uint/sint textures
-    ///   * mesh-shader and variable-rate-shading emission gates
-    ///
-    /// Left at the legacy default, a large fraction of a shipping archive fails to
-    /// emit for reasons that have nothing to do with the shaders. A caller asking
-    /// for a HIGHER model keeps it — the floor only raises.
+    /// EMIT — never to validate input. Every gate is "emitting X requires SM ≥ N",
+    /// so raising it can only unlock: wave ops, non-float texture sampling, mesh
+    /// and variable-rate emission all fire on inputs compiled for older models.
+    /// A caller asking for a HIGHER model keeps it — the floor only raises.
     /// </summary>
     private const uint MinimumEmitShaderModel = 67;
 
     private readonly ConstantBufferStructurer _structurer = new();
-    private readonly SourceEmitter _emitter = new();
+    private readonly SpirvCrossDriver _driver = new();
     private readonly SpirvFrontend _frontend = new();
 
     public DecompileResult Run(byte[] binary, DecompileOptions options)
@@ -61,10 +54,13 @@ internal sealed class DecompilePipeline
 
         try
         {
-            byte[] spirv = _frontend.Convert(format, binary);
+            FrontendOutput frontend = _frontend.Convert(format, binary);
 
             stage = DecompileStage.ScalarLayoutNormalization;
-            spirv = ScalarBlockVectorizer.Vectorize(spirv);
+            byte[] spirv = ScalarBlockVectorizer.Vectorize(frontend.Spirv);
+
+            stage = DecompileStage.InterstageSlotAssignment;
+            spirv = InterstageSlotAssigner.Assign(spirv);
             result.SpirvAfterFrontend = spirv;
 
             stage = DecompileStage.ConstantBufferStructuring;
@@ -75,18 +71,20 @@ internal sealed class DecompilePipeline
             Enrich(options, structured, symbols);
 
             stage = DecompileStage.SymbolInjection;
-            byte[] injected = Inject(structured, symbols);
+            (byte[] injected, List<BlockMemberPrefix> prefixes) = Inject(structured, symbols);
             result.SpirvAfterSymbolInjection = injected;
 
             stage = DecompileStage.SourceEmission;
-            EmittedSource source = Emit(injected, symbols, shaderModel);
+            EntryPointSelection entry = EntryPointResolver.Resolve(injected, symbols.EntryPoint);
+            EmissionPlan plan = BuildPlan(entry, shaderModel, format, frontend.InputSignature, prefixes);
+            string source = Emit(injected, symbols, plan);
 
             result.Success = true;
             result.FailedStage = DecompileStage.Completed;
-            result.SourceCode = source.Text;
-            result.SourceLanguage = source.Language;
-            result.SourceFileExtension = source.FileExtension;
-            result.Stage = source.Stage;
+            result.SourceCode = source;
+            result.SourceLanguage = "hlsl";
+            result.SourceFileExtension = ".hlsl";
+            result.Stage = entry.Stage;
             result.FinalSpirv = injected;
             result.StructuringLog = _structurer.LastRewriteSummary;
             return result;
@@ -98,9 +96,9 @@ internal sealed class DecompilePipeline
     }
 
     // Each wrapper below exists so the thrown message names the stage AND carries
-    // the module state that explains it. A bare "SPIR-V emission failed" is
-    // unactionable; the same message with the patch plan and built-in decorations
-    // attached usually is not.
+    // the module state that explains it. A bare "emission failed" is unactionable;
+    // the same message with the patch plan and built-in decorations attached
+    // usually is not.
 
     private byte[] Structure(byte[] spirv, SerializedProgramData symbols)
     {
@@ -133,7 +131,7 @@ internal sealed class DecompilePipeline
         }
     }
 
-    private byte[] Inject(byte[] spirv, SerializedProgramData symbols)
+    private (byte[] Spirv, List<BlockMemberPrefix> Prefixes) Inject(byte[] spirv, SerializedProgramData symbols)
     {
         try
         {
@@ -142,16 +140,18 @@ internal sealed class DecompilePipeline
             // overwrite whichever of them turn out to be recoverable.
             spirv = AnonymousMemberNamer.Apply(spirv);
 
+            var prefixes = new List<BlockMemberPrefix>();
             if (symbols.GetResourceBindingCount() == 0)
             {
-                return spirv;
+                return (spirv, prefixes);
             }
 
             List<DescriptorBindingInfo> bindings = BindingScanner.Scan(spirv);
             List<NamePatch> names = new ResourceNamePlanner(_structurer.GetResolvedBlockName).Plan(bindings, symbols);
             List<MemberNamePatch> members = new BlockMemberNamePlanner(_structurer.GetResolvedBlockName).Plan(bindings, symbols);
 
-            return DebugNameInjector.Inject(spirv, names, members);
+            CollectBlockMemberPrefixes(bindings, names, members, prefixes);
+            return (DebugNameInjector.Inject(spirv, names, members), prefixes);
         }
         catch (Exception exception)
         {
@@ -163,20 +163,110 @@ internal sealed class DecompilePipeline
         }
     }
 
-    private EmittedSource Emit(byte[] spirv, SerializedProgramData symbols, uint shaderModel)
+    /// <summary>
+    /// Pair every constant-buffer variable's injected name with the member names
+    /// injected into its struct. The backend will spell each member as
+    /// <c>&lt;variable&gt;_&lt;member&gt;</c>; recording the pair here is what lets
+    /// the driver undo that as an exact token rather than a search.
+    /// </summary>
+    private static void CollectBlockMemberPrefixes(
+        List<DescriptorBindingInfo> bindings,
+        List<NamePatch> names,
+        List<MemberNamePatch> members,
+        List<BlockMemberPrefix> prefixes)
     {
-        try
+        foreach (DescriptorBindingInfo binding in bindings)
         {
-            return _emitter.Emit(spirv, symbols.EntryPoint, shaderModel);
+            if (binding.Kind != DescriptorKind.UniformBuffer || binding.StructTypeId is not uint structTypeId)
+            {
+                continue;
+            }
+
+            string? variableName = null;
+            foreach (NamePatch patch in names)
+            {
+                if (patch.Id == binding.Id)
+                {
+                    variableName = patch.Name;
+                    break;
+                }
+            }
+
+            if (variableName is null)
+            {
+                continue;
+            }
+
+            var memberNames = new List<string>();
+            foreach (MemberNamePatch patch in members)
+            {
+                if (patch.StructTypeId == structTypeId)
+                {
+                    memberNames.Add(patch.Name);
+                }
+            }
+
+            if (memberNames.Count > 0)
+            {
+                prefixes.Add(new BlockMemberPrefix(variableName, memberNames));
+            }
         }
-        catch (Exception exception)
+    }
+
+    /// <summary>
+    /// Vertex semantics come from the container's own input signature when there
+    /// is one. A bare SPIR-V input has no signature — it carries only locations,
+    /// which Unity assigned in its fixed attribute order, so that order is the
+    /// semantic. System values are skipped: the backend already emits their
+    /// built-in semantic and a remap would only collide with it.
+    /// </summary>
+    private static EmissionPlan BuildPlan(
+        EntryPointSelection entry,
+        uint shaderModel,
+        ShaderBinaryFormat format,
+        IReadOnlyList<InputSignatureElement> signature,
+        List<BlockMemberPrefix> prefixes)
+    {
+        var plan = new EmissionPlan { EntryPoint = entry, ShaderModel = shaderModel };
+        plan.BlockMemberPrefixes.AddRange(prefixes);
+
+        if (entry.Stage != PipelineStage.Vertex)
         {
-            throw new InvalidOperationException(
-                $"Source emission failed after symbol injection.{Environment.NewLine}" +
-                $"{ModuleReports.DescribePatchPlan(spirv, symbols, _structurer.GetResolvedBlockName)}{Environment.NewLine}" +
-                $"{ModuleReports.DescribeBuiltInDecorations(spirv)}",
-                exception);
+            return plan;
         }
+
+        if (signature.Count > 0)
+        {
+            foreach (InputSignatureElement element in signature)
+            {
+                if (element.SemanticName.StartsWith("SV_", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                plan.VertexAttributes.Add(new VertexAttributeSemantic(element.Register, element.SemanticName + element.SemanticIndex));
+            }
+        }
+        else if (format == ShaderBinaryFormat.SpirV)
+        {
+            UnityVertexAttributeOrder.AppendAll(plan.VertexAttributes);
+        }
+
+        return plan;
+    }
+
+    private string Emit(byte[] spirv, SerializedProgramData symbols, EmissionPlan plan)
+    {
+        string? source = _driver.Emit(spirv, plan);
+        if (source is not null)
+        {
+            return source;
+        }
+
+        throw new InvalidOperationException(
+            $"Source emission failed after symbol injection. {_driver.LastFailure}{Environment.NewLine}" +
+            $"{ModuleReports.DescribePatchPlan(spirv, symbols, _structurer.GetResolvedBlockName)}{Environment.NewLine}" +
+            $"{ModuleReports.DescribeBuiltInDecorations(spirv)}");
     }
 
     private DecompileResult Fail(
@@ -192,7 +282,7 @@ internal sealed class DecompilePipeline
         result.FailedStage = stage;
         result.FinalSpirv = result.SpirvAfterSymbolInjection ?? result.SpirvAfterStructuring ?? result.SpirvAfterFrontend;
         result.StructuringLog = _structurer.LastRewriteSummary;
-        result.NativeToolDiagnostics = _frontend.LastFailure ?? _emitter.LastFailure;
+        result.NativeToolDiagnostics = _frontend.LastFailure ?? _driver.LastFailure;
 
         // Report against the deepest module that exists: an earlier snapshot would
         // describe a state the failure did not happen in.

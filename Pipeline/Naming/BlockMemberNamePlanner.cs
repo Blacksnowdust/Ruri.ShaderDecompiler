@@ -72,7 +72,8 @@ internal sealed class BlockMemberNamePlanner
         // them joined.
         if (binding.StructMemberCount == 1 && allNumeric.Count > 0 && AllAre4x4Matrices(allNumeric))
         {
-            patches.Add(new MemberNamePatch(structTypeId, 0u, string.Join("_", allNumeric.Select(static p => p.Name ?? string.Empty))));
+            string joined = HlslIdentifier.Sanitize(string.Join("_", allNumeric.Select(static p => p.Name ?? string.Empty)));
+            patches.Add(new MemberNamePatch(structTypeId, 0u, string.IsNullOrEmpty(joined) ? HlslIdentifier.PlaceholderAt(0) : joined));
             return;
         }
 
