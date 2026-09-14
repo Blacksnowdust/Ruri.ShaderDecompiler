@@ -1,5 +1,16 @@
 namespace Ruri.ShaderTools.Pipeline.Backend;
 
+/// <summary>
+/// The source language a module is emitted in. HLSL is the product; GLSL is
+/// the only language the backend can spell a ray-tracing, mesh or
+/// buffer-device-address module in — see <see cref="EmitLanguageSelector"/>.
+/// </summary>
+internal enum EmitLanguage
+{
+    Hlsl,
+    Glsl,
+}
+
 /// <summary>One vertex input: the SPIR-V location it arrives at and the D3D semantic it must declare.</summary>
 internal readonly record struct VertexAttributeSemantic(uint Location, string Semantic);
 
@@ -19,12 +30,16 @@ internal sealed record FlattenedBlock(uint VariableId, uint StructTypeId, IReadO
 
 /// <summary>
 /// Every decision the source backend needs that the SPIR-V module itself cannot
-/// carry. Names live in the module as <c>OpName</c>; this holds the rest:
-/// which semantic each vertex input declares, and which flattened blocks get
-/// their members restored to bare symbols.
+/// carry. Names live in the module as <c>OpName</c>; this holds the rest: the
+/// language, which semantic each vertex input declares, and which flattened
+/// blocks get their members restored to bare symbols. The last two are HLSL
+/// facts and stay empty for a GLSL plan: GLSL keeps vertex locations and never
+/// flattens a block.
 /// </summary>
 internal sealed class EmissionPlan
 {
+    public EmitLanguage Language { get; init; }
+
     public List<VertexAttributeSemantic> VertexAttributes { get; } = new();
 
     public List<FlattenedBlock> FlattenedBlocks { get; } = new();

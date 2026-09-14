@@ -76,14 +76,15 @@ internal sealed class DecompilePipeline
 
             stage = DecompileStage.SourceEmission;
             EntryPointSelection entry = EntryPointResolver.Resolve(injected, symbols.EntryPoint);
-            EmissionPlan plan = BuildPlan(entry, shaderModel, format, frontend.InputSignature, flattened);
+            EmitLanguage language = EmitLanguageSelector.Select(injected, entry);
+            EmissionPlan plan = BuildPlan(language, entry, shaderModel, format, frontend.InputSignature, flattened);
             string source = Emit(injected, symbols, plan);
 
             result.Success = true;
             result.FailedStage = DecompileStage.Completed;
             result.SourceCode = source;
-            result.SourceLanguage = "hlsl";
-            result.SourceFileExtension = ".hlsl";
+            result.SourceLanguage = language == EmitLanguage.Glsl ? "glsl" : "hlsl";
+            result.SourceFileExtension = language == EmitLanguage.Glsl ? ".glsl" : ".hlsl";
             result.Stage = entry.Stage;
             result.FinalSpirv = injected;
             result.StructuringLog = _structurer.LastRewriteSummary;
@@ -214,6 +215,9 @@ internal sealed class DecompilePipeline
     }
 
     /// <summary>
+    /// The HLSL facts — vertex semantics and flattened blocks — are planned only
+    /// for an HLSL emission; GLSL keeps its locations and never flattens a block.
+    ///
     /// Vertex semantics come from the container's own input signature when there
     /// is one. A bare SPIR-V input has no signature — it carries only locations,
     /// which Unity assigned in its fixed attribute order, so that order is the
@@ -221,13 +225,19 @@ internal sealed class DecompilePipeline
     /// built-in semantic and a remap would only collide with it.
     /// </summary>
     private static EmissionPlan BuildPlan(
+        EmitLanguage language,
         EntryPointSelection entry,
         uint shaderModel,
         ShaderBinaryFormat format,
         IReadOnlyList<InputSignatureElement> signature,
         List<FlattenedBlock> flattened)
     {
-        var plan = new EmissionPlan { EntryPoint = entry, ShaderModel = shaderModel };
+        var plan = new EmissionPlan { Language = language, EntryPoint = entry, ShaderModel = shaderModel };
+        if (language != EmitLanguage.Hlsl)
+        {
+            return plan;
+        }
+
         plan.FlattenedBlocks.AddRange(flattened);
 
         if (entry.Stage != PipelineStage.Vertex)

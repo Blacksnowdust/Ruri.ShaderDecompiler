@@ -8,20 +8,29 @@ using CrossBackend = Silk.NET.SPIRV.Cross.Backend;
 namespace Ruri.ShaderTools.Pipeline.Backend;
 
 /// <summary>
-/// SPIR-V → HLSL through the spirv-cross C ABI, configured from an
+/// SPIR-V → source through the spirv-cross C ABI, configured from an
 /// <see cref="EmissionPlan"/> instead of patched afterwards.
 ///
 /// Names are not set here: they already live in the module as <c>OpName</c> and
 /// spirv-cross reads them from there. This driver only supplies what the module
 /// cannot express — vertex input semantics and backend options — and undoes the
-/// one spelling the backend imposes that HLSL property binding cannot accept.
+/// one spelling the HLSL backend imposes that Unity property binding cannot
+/// accept.
 ///
-/// HLSL only. A module the backend refuses is a failure with the backend's own
-/// message, not a fallback to another language.
+/// The language is the plan's decision, made from what the module declares. A
+/// module the chosen backend refuses is a failure with the backend's own
+/// message, not a retry in another language.
 /// </summary>
 internal sealed unsafe class SpirvCrossDriver
 {
     private static readonly Cross Api = Cross.GetApi();
+
+    /// <summary>
+    /// Lowest GLSL version that accepts every feature a GLSL-only module can
+    /// declare — ray tracing, ray query, buffer device address — with Vulkan
+    /// semantics always on, because the input is Vulkan-flavoured.
+    /// </summary>
+    private const uint VulkanGlslVersion = 460;
 
     public string? LastFailure { get; private set; }
 
@@ -34,6 +43,8 @@ internal sealed unsafe class SpirvCrossDriver
             LastFailure = $"SPIR-V byte length {spirv.Length} is not a positive multiple of 4.";
             return null;
         }
+
+        bool hlsl = plan.Language == EmitLanguage.Hlsl;
 
         Context* context = null;
         try
@@ -54,14 +65,17 @@ internal sealed unsafe class SpirvCrossDriver
             }
 
             Compiler* compiler;
-            if (Api.ContextCreateCompiler(context, CrossBackend.Hlsl, parsed, CaptureMode.TakeOwnership, &compiler) != Result.Success)
+            if (Api.ContextCreateCompiler(context, hlsl ? CrossBackend.Hlsl : CrossBackend.Glsl, parsed, CaptureMode.TakeOwnership, &compiler) != Result.Success)
             {
                 return Fail(context);
             }
 
-            foreach (VertexAttributeSemantic attribute in plan.VertexAttributes)
+            if (hlsl)
             {
-                AddVertexAttributeRemap(compiler, attribute);
+                foreach (VertexAttributeSemantic attribute in plan.VertexAttributes)
+                {
+                    AddVertexAttributeRemap(compiler, attribute);
+                }
             }
 
             CompilerOptions* options;
@@ -70,8 +84,16 @@ internal sealed unsafe class SpirvCrossDriver
                 return Fail(context);
             }
 
-            Api.CompilerOptionsSetUint(options, CompilerOption.HlslShaderModel, plan.ShaderModel);
-            Api.CompilerOptionsSetBool(options, CompilerOption.ForceZeroInitializedVariables, 1);
+            if (hlsl)
+            {
+                Api.CompilerOptionsSetUint(options, CompilerOption.HlslShaderModel, plan.ShaderModel);
+                Api.CompilerOptionsSetBool(options, CompilerOption.ForceZeroInitializedVariables, 1);
+            }
+            else
+            {
+                Api.CompilerOptionsSetUint(options, CompilerOption.GlslVersion, VulkanGlslVersion);
+                Api.CompilerOptionsSetBool(options, CompilerOption.GlslVulkanSemantics, 1);
+            }
 
             if (Api.CompilerInstallCompilerOptions(compiler, options) != Result.Success)
             {
@@ -91,11 +113,14 @@ internal sealed unsafe class SpirvCrossDriver
 
             string text = Marshal.PtrToStringUTF8((IntPtr)source) ?? string.Empty;
 
-            string? unlanded = RestoreAuthoredMembers(compiler, ref text, plan.FlattenedBlocks);
-            if (unlanded is not null)
+            if (hlsl)
             {
-                LastFailure = unlanded;
-                return null;
+                string? unlanded = RestoreAuthoredMembers(compiler, ref text, plan.FlattenedBlocks);
+                if (unlanded is not null)
+                {
+                    LastFailure = unlanded;
+                    return null;
+                }
             }
 
             return text;
@@ -133,7 +158,7 @@ internal sealed unsafe class SpirvCrossDriver
     }
 
     /// <summary>
-    /// The backend flattens every constant buffer into
+    /// The HLSL backend flattens every constant buffer into
     /// <c>&lt;variable&gt;_&lt;member&gt;</c> identifiers and offers no option to
     /// stop. Its spelling of both halves is read back from it after compilation —
     /// that is the spelling it uniquified and wrote, including any respelling of
